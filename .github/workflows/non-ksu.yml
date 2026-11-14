@@ -131,7 +131,7 @@ jobs:
           git clone --depth=1 -b vince https://github.com/miracle7x/AnyKernel3 AnyKernel3
           cp "$IMG" AnyKernel3/
 
-          ZIP_NAME="msm8953-playground-vince-$(date +%Y%m%d-%H%M)-${GITHUB_SHA::7}.zip"
+          ZIP_NAME="msm8953-playground-vince-$(date +%Y%m%d-%H%M).zip"
           cd AnyKernel3
           zip -r9 "../${ZIP_NAME}" * -x .git README.md "*placeholder"
           cd ..
