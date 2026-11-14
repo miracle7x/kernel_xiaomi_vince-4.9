@@ -133,7 +133,7 @@ jobs:
           git clone --depth=1 -b main https://github.com/miracle7x/AnyKernel3 AnyKernel3
           cp "$IMG" AnyKernel3/
 
-          ZIP_NAME="msm8953-playground-vince-ksu-NonKSU-$(date +%Y%m%d-%H%M)-${GITHUB_SHA::7}.zip"
+          ZIP_NAME="msm8953-playground-vince-ksu-$(date +%Y%m%d-%H%M)-${GITHUB_SHA::7}.zip"
           cd AnyKernel3
           zip -r9 "../${ZIP_NAME}" * -x .git README.md "*placeholder"
           cd ..
@@ -160,14 +160,14 @@ jobs:
       - name: 🚀 Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: vince--nonksu-${{ github.run_number }}
-          name: Vince NonKSU Kernel #${{ github.run_number }}
+          tag_name: vince-ksu-${{ github.run_number }}
+          name: Vince KSU Kernel #${{ github.run_number }}
           body: |
             **Device:** Redmi 5 Plus / Redmi Note 5 (vince)
             **Branch:** ${{ github.ref_name }}
             **Commit:** ${{ github.sha }}
             **Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          files: msm8953-playground-vince-*.zip
+          files: msm8953-playground-vince-ksu-*.zip
           prerelease: false
           fail_on_unmatched_files: true
           
