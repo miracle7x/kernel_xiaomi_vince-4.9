@@ -1,0 +1,178 @@
+name: Build-Kernel-Vince-NonKSU
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "14" ]   # branch default repo rayola708/kernel_msm-4.9
+
+permissions:
+  contents: write
+  
+env:
+  ARCH: arm64
+  SUBARCH: arm64
+  CLANG_TRIPLE: aarch64-linux-gnu-
+  CROSS_COMPILE: aarch64-linux-gnu-
+  CROSS_COMPILE_ARM32: arm-linux-gnueabi-
+  CCACHE_DIR: /home/runner/.ccache
+  CCACHE_MAXSIZE: 5G
+  CCACHE_COMPRESS: 1
+  CCACHE_COMPRESSLEVEL: 1
+  CCACHE_SLOPPINESS: time_macros,include_file_mtime,include_file_ctime
+  CCACHE_NOHASHDIR: 1
+  KBUILD_BUILD_USER: server
+  KBUILD_BUILD_HOST: build
+  TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+  TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 🔥 Telegram Start
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            -d parse_mode="HTML" \
+            -d text="🚀 <b>Kernel CI started (vince)</b>%0A%0A<b>Workflow:</b> ${{ github.workflow }}%0A<b>Branch:</b> ${{ github.ref_name }}%0A<b>Commit:</b> <code>${GITHUB_SHA::7}</code>%0A<b>Run:</b> <a href=\"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\">#${{ github.run_number }}</a>"
+
+      - name: 🔄 Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: ⚡ Cache Clang
+        uses: actions/cache@v4
+        with:
+          path: clang
+          key: ${{ runner.os }}-proton-clang-master
+
+      - name: ⚡ Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/.ccache
+          key: ${{ runner.os }}-ccache-vince-${{ github.sha }}
+          restore-keys: ${{ runner.os }}-ccache-vince-
+
+      - name: 🔧 Deps
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends bc bison flex libssl-dev libelf-dev ccache zip libncurses6
+          sudo ln -sf /usr/lib/x86_64-linux-gnu/libtinfo.so.6 /usr/lib/x86_64-linux-gnu/libtinfo.so.5 2>/dev/null || true
+          sudo ln -sf /usr/lib/x86_64-linux-gnu/libncurses.so.6 /usr/lib/x86_64-linux-gnu/libncurses.so.5 2>/dev/null || true
+
+      - name: ⚙ Toolchain
+        run: |
+          if [ ! -f "clang/bin/clang" ]; then
+            git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang
+          fi
+          # Hapus binutils host bawaan proton agar memakai ld/as bawaan sistem
+          rm -f clang/bin/ld clang/bin/as
+
+      - name: 🔍 Detect defconfig
+        run: |
+          DEF=$(find arch/arm64/configs/vince-perf_defconfig | head -n1)
+          if [ -z "$DEF" ]; then
+            echo "vince-perf_defconfig tidak ditemukan. Isi arch/arm64/configs:"
+            ls -R arch/arm64/configs | head -n 80
+            exit 1
+          fi
+          # simpan path relatif terhadap arch/arm64/configs (mis. vince_defconfig atau vendor/vince_defconfig)
+          echo "DEFCONFIG=${DEF#arch/arm64/configs/}" >> $GITHUB_ENV
+          echo "Pakai defconfig: ${DEF#arch/arm64/configs/}"
+
+      - name: 🥷 Remove hardcoded build user/host
+        run: |
+          echo "== Sebelum =="
+          grep -rnE "KBUILD_BUILD_(USER|HOST)|LINUX_COMPILE_(BY|HOST)=" \
+            Makefile arch/*/Makefile scripts/mkcompile_h 2>/dev/null || true
+
+          # 1. Hapus override KBUILD_BUILD_USER/HOST di Makefile utama & arch
+          for f in Makefile arch/*/Makefile; do
+            [ -f "$f" ] || continue
+            sed -i -E '/^[[:space:]]*(override[[:space:]]+)?(export[[:space:]]+)?KBUILD_BUILD_(USER|HOST)[[:space:]]*[:?+]?=/d' "$f"
+          done
+
+          # 2. Ganti nilai literal di scripts/mkcompile_h dengan env var
+          f=scripts/mkcompile_h
+          if [ -f "$f" ]; then
+            sed -i -E 's|^([[:space:]]*)LINUX_COMPILE_BY=[^$(`]+$|\1LINUX_COMPILE_BY="$KBUILD_BUILD_USER"|' "$f"
+            sed -i -E 's|^([[:space:]]*)LINUX_COMPILE_HOST=[^$(`]+$|\1LINUX_COMPILE_HOST="$KBUILD_BUILD_HOST"|' "$f"
+          fi
+
+      - name: 📥 Setup KernelSU
+        run: |
+          
+      - name: 🛠️ Build
+        run: |
+          export PATH="$PWD/clang/bin:$PATH"
+
+          mkdir -p out
+          JOBS=$(( $(nproc --all) * 2 ))
+
+          make -j${JOBS} O=out ${DEFCONFIG}
+          make -j${JOBS} O=out \
+            CC="ccache clang" \
+            HOSTCC="ccache gcc" \
+            HOSTCXX="ccache g++" \
+            Image.gz-dtb
+
+      - name: 📦 Package AnyKernel3
+        run: |
+          IMG=out/arch/arm64/boot/Image.gz-dtb
+          if [ ! -f "$IMG" ]; then
+            echo "Image.gz-dtb tidak ditemukan. Isi out/arch/arm64/boot:"
+            ls -la out/arch/arm64/boot
+            exit 1
+          fi
+
+          git clone --depth=1 -b main https://github.com/miracle7x/AnyKernel3 AnyKernel3
+          cp "$IMG" AnyKernel3/
+
+          ZIP_NAME="msm8953-playground-vince-$(date +%Y%m%d-%H%M)-${GITHUB_SHA::7}.zip"
+          cd AnyKernel3
+          zip -r9 "../${ZIP_NAME}" * -x .git README.md "*placeholder"
+          cd ..
+
+          echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
+          ls -lh "${ZIP_NAME}"
+
+      - name: ⬇️ Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: msm8953-playground-vince
+          path: msm8953-playground-vince-*.zip
+
+      - name: ⬇️ Telegram Upload
+        run: |
+          ZIP=$(ls msm8953-playground-vince-*.zip | head -n1)
+          SIZE=$(du -h "$ZIP" | cut -f1)
+          curl -s -F document=@"$ZIP" \
+            -F chat_id="${TELEGRAM_CHAT_ID}" \
+            -F parse_mode="HTML" \
+            -F caption=$'✅ <b>Kernel CI build success (vince)</b>\n\n<b>File:</b> '"$ZIP"$'\n<b>Size:</b> '"$SIZE"$'\n<b>Branch:</b> ${{ github.ref_name }}\n<b>Commit:</b> <code>'"${GITHUB_SHA::7}"$'</code>' \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument"
+
+      - name: 🚀 Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: vince-nonksu-${{ github.run_number }}
+          name: Vince NonKSU Kernel #${{ github.run_number }}
+          body: |
+            **Device:** Redmi 5 Plus / Redmi Note 5 (vince)
+            **Branch:** ${{ github.ref_name }}
+            **Commit:** ${{ github.sha }}
+            **Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          files: msm8953-playground-vince-*.zip
+          prerelease: false
+          fail_on_unmatched_files: true
+          
+      - name: ❌ Telegram Failed
+        if: failure()
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            -d parse_mode="HTML" \
+            -d text="❌ <b>Kernel CI build gagal (vince)</b>%0A%0A<b>Branch:</b> ${{ github.ref_name }}%0A<b>Run:</b> <a href=\"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\">#${{ github.run_number }}</a>"
