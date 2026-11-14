@@ -133,7 +133,7 @@ jobs:
           git clone --depth=1 -b main https://github.com/miracle7x/AnyKernel3 AnyKernel3
           cp "$IMG" AnyKernel3/
 
-          ZIP_NAME="msm8953-playground-vince-NonKSU-$(date +%Y%m%d-%H%M)-${GITHUB_SHA::7}.zip"
+          ZIP_NAME="msm8953-playground-vince-ksu-NonKSU-$(date +%Y%m%d-%H%M)-${GITHUB_SHA::7}.zip"
           cd AnyKernel3
           zip -r9 "../${ZIP_NAME}" * -x .git README.md "*placeholder"
           cd ..
@@ -144,12 +144,12 @@ jobs:
       - name: ⬇️ Upload
         uses: actions/upload-artifact@v4
         with:
-          name: msm8953-playground-vince
-          path: msm8953-playground-vince-*.zip
+          name: msm8953-playground-vince-ksu
+          path: msm8953-playground-vince-ksu-*.zip
 
       - name: ⬇️ Telegram Upload
         run: |
-          ZIP=$(ls msm8953-playground-vince-*.zip | head -n1)
+          ZIP=$(ls msm8953-playground-vince-ksu-*.zip | head -n1)
           SIZE=$(du -h "$ZIP" | cut -f1)
           curl -s -F document=@"$ZIP" \
             -F chat_id="${TELEGRAM_CHAT_ID}" \
