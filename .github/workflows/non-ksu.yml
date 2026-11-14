@@ -1,4 +1,4 @@
-name: Build-Kernel-Vince-NonKSU
+name: NonKSU
 
 on:
   workflow_dispatch:
@@ -128,7 +128,7 @@ jobs:
             exit 1
           fi
 
-          git clone --depth=1 -b main https://github.com/miracle7x/AnyKernel3 AnyKernel3
+          git clone --depth=1 -b vince https://github.com/miracle7x/AnyKernel3 AnyKernel3
           cp "$IMG" AnyKernel3/
 
           ZIP_NAME="msm8953-playground-vince-$(date +%Y%m%d-%H%M)-${GITHUB_SHA::7}.zip"
