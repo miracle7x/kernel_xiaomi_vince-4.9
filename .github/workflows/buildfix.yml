@@ -1,4 +1,4 @@
-name: Build-Vince-KSU
+name: Build-Kernel-Vince-KSU
 
 on:
   workflow_dispatch:
