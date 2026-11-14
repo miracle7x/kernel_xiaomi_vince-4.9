@@ -119,21 +119,6 @@ jobs:
             HOSTCXX="ccache g++" \
             Image.gz-dtb
 
-      - name: 📦 Package
-        run: |
-          git clone --depth=1 https://github.com/miracle7x/AnyKernel3.git anykernel
-          rm -rf anykernel/.git anykernel/README.md anykernel/modules anykernel/patch anykernel/ramdisk
-
-          sed -i 's/^kernel.string=.*/kernel.string=perf kernel vince by cappuccino/' anykernel/anykernel.sh
-          sed -i 's/^do.devicecheck=.*/do.devicecheck=1/' anykernel/anykernel.sh
-          sed -i 's/^device.name1=.*/device.name1=vince/' anykernel/anykernel.sh
-          sed -i 's/^is_slot_device=.*/is_slot_device=0/' anykernel/anykernel.sh
-          sed -i 's|^BLOCK=.*|BLOCK=/dev/block/bootdevice/by-name/boot;|' anykernel/anykernel.sh
-          cp out/arch/arm64/boot/Image.gz-dtb anykernel/Image.gz-dtb
-
-          cd anykernel
-          zip -r9 ../msm8953-playground-vince-$(date +'%Y%m%d').zip * -x .git README.md *placeholder
-
       - name: ⬇️ Upload
         uses: actions/upload-artifact@v4
         with:
