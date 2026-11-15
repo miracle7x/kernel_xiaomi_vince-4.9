@@ -20,7 +20,7 @@ env:
   CCACHE_COMPRESSLEVEL: 1
   CCACHE_SLOPPINESS: time_macros,include_file_mtime,include_file_ctime
   CCACHE_NOHASHDIR: 1
-  KBUILD_BUILD_USER: server
+  KBUILD_BUILD_USER: biarindeh
   KBUILD_BUILD_HOST: build
   TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
   TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -83,25 +83,6 @@ jobs:
           echo "DEFCONFIG=${DEF#arch/arm64/configs/}" >> $GITHUB_ENV
           echo "Pakai defconfig: ${DEF#arch/arm64/configs/}"
 
-      - name: 🥷 Remove hardcoded build user/host
-        run: |
-          echo "== Sebelum =="
-          grep -rnE "KBUILD_BUILD_(USER|HOST)|LINUX_COMPILE_(BY|HOST)=" \
-            Makefile arch/*/Makefile scripts/mkcompile_h 2>/dev/null || true
-
-          # 1. Hapus override KBUILD_BUILD_USER/HOST di Makefile utama & arch
-          for f in Makefile arch/*/Makefile; do
-            [ -f "$f" ] || continue
-            sed -i -E '/^[[:space:]]*(override[[:space:]]+)?(export[[:space:]]+)?KBUILD_BUILD_(USER|HOST)[[:space:]]*[:?+]?=/d' "$f"
-          done
-
-          # 2. Ganti nilai literal di scripts/mkcompile_h dengan env var
-          f=scripts/mkcompile_h
-          if [ -f "$f" ]; then
-            sed -i -E 's|^([[:space:]]*)LINUX_COMPILE_BY=[^$(`]+$|\1LINUX_COMPILE_BY="$KBUILD_BUILD_USER"|' "$f"
-            sed -i -E 's|^([[:space:]]*)LINUX_COMPILE_HOST=[^$(`]+$|\1LINUX_COMPILE_HOST="$KBUILD_BUILD_HOST"|' "$f"
-          fi
-
       - name: 📥 Setup KernelSU
         run: |
           curl -LSs "https://raw.githubusercontent.com/manipvlator/KernelSU/refs/heads/main/kernel/setup.sh" | bash -s main
@@ -133,7 +114,7 @@ jobs:
           git clone --depth=1 -b vince https://github.com/miracle7x/AnyKernel3 AnyKernel3
           cp "$IMG" AnyKernel3/
 
-          ZIP_NAME="msm8953-playground-vince-ksu-$(date +%Y%m%d-%H%M).zip"
+          ZIP_NAME="evernight-vince-ksu-$(date +%Y%m%d-%H%M).zip"
           cd AnyKernel3
           zip -r9 "../${ZIP_NAME}" * -x .git README.md "*placeholder"
           cd ..
@@ -144,12 +125,12 @@ jobs:
       - name: ⬇️ Upload
         uses: actions/upload-artifact@v4
         with:
-          name: msm8953-playground-vince-ksu
-          path: msm8953-playground-vince-ksu-*.zip
+          name: evernight-vince-ksu
+          path: evernight-vince-ksu-*.zip
 
       - name: ⬇️ Telegram Upload
         run: |
-          ZIP=$(ls msm8953-playground-vince-ksu-*.zip | head -n1)
+          ZIP=$(ls evernight-vince-ksu-*.zip | head -n1)
           SIZE=$(du -h "$ZIP" | cut -f1)
           curl -s -F document=@"$ZIP" \
             -F chat_id="${TELEGRAM_CHAT_ID}" \
@@ -161,13 +142,13 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: vince-ksu-${{ github.run_number }}
-          name: Vince KSU Kernel #${{ github.run_number }}
+          name: Vince KSU Evernight Kernel #${{ github.run_number }}
           body: |
             **Device:** Redmi 5 Plus / Redmi Note 5 (vince)
             **Branch:** ${{ github.ref_name }}
             **Commit:** ${{ github.sha }}
             **Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          files: msm8953-playground-vince-ksu-*.zip
+          files: evernight-vince-ksu-*.zip
           prerelease: false
           fail_on_unmatched_files: true
           
