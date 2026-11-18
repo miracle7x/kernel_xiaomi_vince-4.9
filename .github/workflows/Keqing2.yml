@@ -64,13 +64,9 @@ jobs:
           esc() { sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
 
           blk() {
-            printf '┌┤□□□□□□□□□□│ 0.00%%\n├ Variant : %s\n├ Status : ⏳ Waiting\n├ ⚙️ Compiler : Proton Clang\n├ ⏱ Time : 0m00d | 0m00d\n├ ⌛️ In Progress : 0 / 0 step\n├ Speed : 0.00 step/mnt\n└ 🧬 Kernel : %s' \
+            printf '┌┤□□□□□□□□□□│ 0.00%%\n├ Variant : %s\n├ Device : Vince\n├ Status : ⏳ Waiting\n├ Compiler : Proton Clang\n├ Time : 0m00s | 0m00s\n├ In Progress : 0 / 0 steps\n├ Speed : 0.00 steps/min\n└ Kernel : %s' \
               "$1" "$KVER"
           }
-
-          h="<pre>$(blk KSU | esc)</pre><pre>$(blk NonKSU | esc)</pre>"
-          h+="<p>$(esc <<< "📱 Redmi 5 Plus (vince) · 🌿 ${BRANCH} · 🔖 ${GITHUB_SHA::7} · 🔢 #${GITHUB_RUN_NUMBER}")</p>"
-          RICH="$(jq -nc --arg h "$h" '{html:$h, skip_entity_detection:true}')"
 
           R="$(curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendRichMessage" \
             --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
