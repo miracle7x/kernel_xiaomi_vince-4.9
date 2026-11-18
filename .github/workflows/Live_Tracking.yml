@@ -1,0 +1,247 @@
+name: Tracking
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  tracker:
+    name: Create Telegram Tracker
+    runs-on: ubuntu-latest
+    outputs:
+      message_id: ${{ steps.telegram.outputs.message_id }}
+      build_time: ${{ steps.time.outputs.build_time }}
+    steps:
+      - name: 🕒 Generate Build Time
+        id: time
+        run: echo "build_time=$(TZ=Asia/Jakarta date +'%d%m%Y-%H%M')" >> "$GITHUB_OUTPUT"
+
+      - name: 📡 Create Telegram Tracker
+        id: telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          BUILD_TIME: ${{ steps.time.outputs.build_time }}
+        run: |
+          esc() { sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+
+          # Satu baris tabel: row "label" "nilai"
+          row() { printf '<tr><th align="left">%s</th><td>%s</td></tr>' "$1" "$(esc <<< "$2")"; }
+
+          # render <status KSU-AOSP> <status KSU-OEM> <status Non-KSU> [footer]
+          # Output: HTML Rich Message (Bot API 10.1+) berisi tabel native Telegram
+          render() {
+            local h
+            h="<table bordered><tr><th colspan=\"2\" align=\"center\">🔨 AGNI REFORGE</th></tr>"
+            h+="$(row "🤖 KSU-AOSP" "$1")$(row "🛡️ KSU-OEM" "$2")$(row "🧩 Non-KSU" "$3")</table>"
+            h+="<table bordered>$(row "📱 Device" "Sweet2")$(row "🕒 Build" "#${BUILD_TIME}")$(row "🔢 Run" "#${GITHUB_RUN_NUMBER}")</table>"
+            if [ -n "${4:-}" ]; then h+="<p>$(esc <<< "$4")</p>"; fi
+            printf '%s' "$h"
+          }
+
+          # Bungkus HTML jadi parameter rich_message
+          rich() { jq -nc --arg h "$1" '{html:$h, skip_entity_detection:true}'; }
+
+
+          TEXT="$(render "⏳ Waiting" "⏳ Waiting" "⏳ Waiting")"
+
+          R="$(curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendRichMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "rich_message=$(rich "$TEXT")")"
+
+          ID="$(echo "$R" | jq -r '.result.message_id // empty')"
+          [ -n "$ID" ] || { echo "$R"; exit 1; }
+          echo "message_id=$ID" >> "$GITHUB_OUTPUT"
+
+  telegram-live:
+    name: Telegram Live Tracker
+    runs-on: ubuntu-latest
+    needs: tracker
+    env:
+      MESSAGE_ID: ${{ needs.tracker.outputs.message_id }}
+      BUILD_TIME: ${{ needs.tracker.outputs.build_time }}
+    steps:
+      - name: 📡 Live Tracking
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -u
+          API="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs?per_page=100"
+          ART_API="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts"
+          LAST=""
+
+          # URL CDN per varian (diisi setelah job build-nya sukses)
+          URL_K=""; URL_O=""; URL_N=""
+          TRIED_K=0; TRIED_O=0; TRIED_N=0
+
+          duration() {
+            local s="$1"
+            [ "$s" -lt 0 ] && s=0
+            if [ "$s" -lt 60 ]; then
+              echo "${s}s"
+            elif [ "$s" -lt 3600 ]; then
+              printf '%dm %02ds\n' $((s/60)) $((s%60))
+            else
+              printf '%dh %02dm %02ds\n' $((s/3600)) $(((s%3600)/60)) $((s%60))
+            fi
+          }
+
+          step() {
+            local j="$1" s c n t start now elapsed
+
+            [ -z "$j" ] || [ "$j" = "null" ] && { echo "⏳ Waiting"; return; }
+
+            s="$(jq -r '.status' <<< "$j")"
+            c="$(jq -r '.conclusion // empty' <<< "$j")"
+
+            if [ "$s" = completed ]; then
+              if [ "$c" = success ]; then
+                echo "✅ Done"
+              else
+                n="$(jq -r '.steps[] | select(.conclusion=="failure") | .name' <<< "$j" | head -1 | sed 's/[^ -~]//g; s/^ *//')"
+                echo "❌ Failed - ${n:-Failed}"
+              fi
+              return
+            fi
+
+            [ "$s" = queued ] && { echo "⏳ Waiting"; return; }
+
+            if [ "$s" = in_progress ]; then
+              n="$(jq -r '.steps[] | select(.status=="in_progress") | .name' <<< "$j" | head -1 | sed 's/[^ -~]//g; s/^ *//')"
+              [ -n "$n" ] || { echo "🔄 Starting..."; return; }
+
+              t="$(jq -r '.steps[] | select(.status=="in_progress") | .started_at' <<< "$j" | head -1)"
+              start="$(date -d "$t" +%s 2>/dev/null || echo 0)"
+              now="$(date -u +%s)"
+              elapsed=$((now-start))
+              echo "🔄 $(duration "$elapsed")  $n"
+              return
+            fi
+
+            echo "⏳ Waiting"
+          }
+
+          # Ambil URL CDN dari artifact kecil "cdnurl-<varian>" yang diupload job build
+          get_url() {
+            local name="cdnurl-$1" arts aurl tmp
+            arts="$(curl -fsS \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "${ART_API}?name=${name}")" || return 0
+            aurl="$(jq -r '.artifacts[0].archive_download_url // empty' <<< "$arts")"
+            [ -n "$aurl" ] || return 0
+            tmp="$(mktemp)"
+            if curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" "$aurl" -o "$tmp"; then
+              unzip -p "$tmp" cdn_url.txt 2>/dev/null | head -n 1 | tr -d '\r\n'
+            fi
+            rm -f "$tmp"
+          }
+
+          # Tombol download per varian (hanya yang URL-nya sudah ada)
+          build_kb() {
+            jq -nrc --arg a "$URL_K" --arg o "$URL_O" --arg n "$URL_N" '
+              [ (if $a != "" then {text:"📥 Download AOSP",   url:$a} else empty end),
+                (if $o != "" then {text:"📥 Download OEM",    url:$o} else empty end),
+                (if $n != "" then {text:"📥 Download Non-KSU", url:$n} else empty end) ] as $b
+              | if ($b | length) == 0 then "" else {inline_keyboard: ($b | map([.]))} end'
+          }
+
+          update() {
+            local text="$1" markup="${2:-}" r d key
+            local args=()
+
+            key="${text}|${markup}"
+            [ "$key" = "$LAST" ] && return 0
+
+            args=(--data-urlencode "chat_id=${TELEGRAM_CHAT_ID}"
+                  --data-urlencode "message_id=${MESSAGE_ID}"
+                  --data-urlencode "rich_message=$(rich "$text")")
+            if [ -n "$markup" ]; then
+              args+=(--data-urlencode "reply_markup=${markup}")
+            fi
+
+            r="$(curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/editMessageText" "${args[@]}")"
+
+            d="$(jq -r '.description // empty' <<< "$r")"
+            if [ "$(jq -r '.ok // false' <<< "$r")" != true ] &&
+               [[ "$d" != *"message is not modified"* ]]; then
+              echo "Telegram update failed: $d"
+              return 1
+            fi
+            LAST="$key"
+          }
+
+          esc() { sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+
+          # Satu baris tabel: row "label" "nilai"
+          row() { printf '<tr><th align="left">%s</th><td>%s</td></tr>' "$1" "$(esc <<< "$2")"; }
+
+          # render <status KSU-AOSP> <status KSU-OEM> <status Non-KSU> [footer]
+          # Output: HTML Rich Message (Bot API 10.1+) berisi tabel native Telegram
+          render() {
+            local h
+            h="<table bordered><tr><th colspan=\"2\" align=\"center\">🔨 AGNI REFORGE</th></tr>"
+            h+="$(row "🤖 KSU-AOSP" "$1")$(row "🛡️ KSU-OEM" "$2")$(row "🧩 Non-KSU" "$3")</table>"
+            h+="<table bordered>$(row "📱 Device" "Sweet2")$(row "🕒 Build" "#${BUILD_TIME}")$(row "🔢 Run" "#${GITHUB_RUN_NUMBER}")</table>"
+            if [ -n "${4:-}" ]; then h+="<p>$(esc <<< "$4")</p>"; fi
+            printf '%s' "$h"
+          }
+
+          # Bungkus HTML jadi parameter rich_message
+          rich() { jq -nc --arg h "$1" '{html:$h, skip_entity_detection:true}'; }
+
+
+          while true; do
+            JOBS="$(curl -fsS \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" "$API")"
+
+            KSU="$(jq -c '.jobs[] | select(.name=="Reforging - KSU-AOSP")' <<< "$JOBS" | head -1)"
+            OEM="$(jq -c '.jobs[] | select(.name=="Reforging - KSU-OEM")' <<< "$JOBS" | head -1)"
+            NON="$(jq -c '.jobs[] | select(.name=="Reforging - Non-KSU")' <<< "$JOBS" | head -1)"
+
+            KSUS="$(step "$KSU")"
+            OEMS="$(step "$OEM")"
+            NONS="$(step "$NON")"
+
+            KC="$(jq -r '.conclusion // empty' <<< "$KSU")"
+            OC="$(jq -r '.conclusion // empty' <<< "$OEM")"
+            NC="$(jq -r '.conclusion // empty' <<< "$NON")"
+
+            # Begitu sebuah varian sukses, ambil URL CDN-nya (satu kali percobaan)
+            if [ "$KC" = success ] && [ "$TRIED_K" -eq 0 ]; then URL_K="$(get_url KSU-AOSP)"; TRIED_K=1; fi
+            if [ "$OC" = success ] && [ "$TRIED_O" -eq 0 ]; then URL_O="$(get_url KSU-OEM)";  TRIED_O=1; fi
+            if [ "$NC" = success ] && [ "$TRIED_N" -eq 0 ]; then URL_N="$(get_url Non-KSU)";  TRIED_N=1; fi
+
+            KEYBOARD="$(build_kb)"
+
+            if [ "$KC" = success ] && [ "$OC" = success ] && [ "$NC" = success ]; then
+            TEXT="$(render "✅ Done" "✅ Done" "✅ Done" "✅ All builds completed successfully.")"
+
+              update "$TEXT" "$KEYBOARD" || true
+              exit 0
+            fi
+
+            if [ -n "$KC" ] && [ -n "$OC" ] && [ -n "$NC" ]; then
+              if [[ "$KC" =~ ^(failure|cancelled|timed_out)$ ]] ||
+                 [[ "$OC" =~ ^(failure|cancelled|timed_out)$ ]] ||
+                 [[ "$NC" =~ ^(failure|cancelled|timed_out)$ ]]; then
+              TEXT="$(render "$KSUS" "$OEMS" "$NONS" "❌ One or more builds failed.")"
+
+                update "$TEXT" "$KEYBOARD" || true
+                exit 0
+              fi
+            fi
+
+            TEXT="$(render "$KSUS" "$OEMS" "$NONS")"
+
+            update "$TEXT" "$KEYBOARD" || true
+            sleep 7
+          done
