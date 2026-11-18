@@ -1,0 +1,486 @@
+name: Build-Vince-KSU-NonKSU
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "14" ]   # branch default repo rayola708/kernel_msm-4.9
+
+permissions:
+  contents: write
+  actions: read
+
+env:
+  ARCH: arm64
+  SUBARCH: arm64
+  CLANG_TRIPLE: aarch64-linux-gnu-
+  CROSS_COMPILE: aarch64-linux-gnu-
+  CROSS_COMPILE_ARM32: arm-linux-gnueabi-
+  CCACHE_DIR: /home/runner/.ccache
+  CCACHE_MAXSIZE: 5G
+  CCACHE_COMPRESS: 1
+  CCACHE_COMPRESSLEVEL: 1
+  CCACHE_SLOPPINESS: time_macros,include_file_mtime,include_file_ctime
+  CCACHE_NOHASHDIR: 1
+  KBUILD_BUILD_USER: biarindeh
+  KBUILD_BUILD_HOST: build
+  TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+  TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+jobs:
+  # ───────────────────────── 1. Buat pesan tracker ─────────────────────────
+  tracker:
+    name: Create Telegram Tracker
+    runs-on: ubuntu-latest
+    outputs:
+      message_id: ${{ steps.telegram.outputs.message_id }}
+      build_time: ${{ steps.time.outputs.build_time }}
+    steps:
+      - name: 🕒 Generate Build Time
+        id: time
+        run: echo "build_time=$(TZ=Asia/Jakarta date +'%d%m%Y-%H%M')" >> "$GITHUB_OUTPUT"
+
+      - name: 📡 Create Telegram Tracker
+        id: telegram
+        env:
+          BUILD_TIME: ${{ steps.time.outputs.build_time }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          esc() { sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+          row() { printf '<tr><th align="left">%s</th><td>%s</td></tr>' "$1" "$(esc <<< "$2")"; }
+
+          # render <status KSU> <status NonKSU> [footer]
+          render() {
+            local h
+            h="<table bordered><tr><th colspan=\"2\" align=\"center\">🔨 EVERNIGHT</th></tr>"
+            h+="$(row "⚙️ KSU" "$1")$(row "⚙️ NonKSU" "$2")</table>"
+            h+="<table bordered>$(row "📱 Device" "Redmi 5 Plus (vince)")"
+            h+="$(row "🌿 Branch" "$BRANCH")$(row "🔖 Commit" "${GITHUB_SHA::7}")"
+            h+="$(row "🕒 Build" "#${BUILD_TIME}")$(row "🔢 Run" "#${GITHUB_RUN_NUMBER}")</table>"
+            if [ -n "${3:-}" ]; then h+="<p>$(esc <<< "$3")</p>"; fi
+            printf '%s' "$h"
+          }
+          rich() { jq -nc --arg h "$1" '{html:$h, skip_entity_detection:true}'; }
+
+          R="$(curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendRichMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "rich_message=$(rich "$(render "⏳ Waiting" "⏳ Waiting")")")"
+
+          ID="$(jq -r '.result.message_id // empty' <<< "$R")"
+          [ -n "$ID" ] || { echo "$R"; exit 1; }
+          echo "message_id=$ID" >> "$GITHUB_OUTPUT"
+
+  # ───────────────────────── 2. Build kernel (matrix: KSU & NonKSU) ─────────────────────────
+  build:
+    name: Reforging - vince (${{ matrix.label }})   # nama ini dipakai live tracker, jangan diubah sepihak
+    runs-on: ubuntu-latest
+    needs: tracker
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false          # kalau satu varian gagal, varian lain tetap jalan
+      matrix:
+        include:
+          - variant: ksu
+            label: KSU
+            ksu: true
+          - variant: nonksu
+            label: NonKSU
+            ksu: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: Cache Clang
+        uses: actions/cache@v4
+        with:
+          path: clang
+          key: ${{ runner.os }}-proton-clang-master
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/.ccache
+          key: ${{ runner.os }}-ccache-vince-${{ matrix.variant }}-${{ github.sha }}
+          restore-keys: ${{ runner.os }}-ccache-vince-${{ matrix.variant }}-
+
+      - name: Deps
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends bc bison flex libssl-dev libelf-dev ccache zip libncurses6
+          sudo ln -sf /usr/lib/x86_64-linux-gnu/libtinfo.so.6 /usr/lib/x86_64-linux-gnu/libtinfo.so.5 2>/dev/null || true
+          sudo ln -sf /usr/lib/x86_64-linux-gnu/libncurses.so.6 /usr/lib/x86_64-linux-gnu/libncurses.so.5 2>/dev/null || true
+
+      - name: ⚙ Toolchain
+        run: |
+          if [ ! -f "clang/bin/clang" ]; then
+            git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang
+          fi
+          # Hapus binutils host bawaan proton agar memakai ld/as bawaan sistem
+          rm -f clang/bin/ld clang/bin/as
+
+      - name: Detect defconfig
+        run: |
+          DEF="arch/arm64/configs/vince-perf_defconfig"
+          if [ ! -f "$DEF" ]; then
+            echo "vince-perf_defconfig tidak ditemukan. Isi arch/arm64/configs:"
+            ls -R arch/arm64/configs | head -n 80
+            exit 1
+          fi
+          echo "DEFCONFIG=${DEF#arch/arm64/configs/}" >> "$GITHUB_ENV"
+          echo "Pakai defconfig: ${DEF#arch/arm64/configs/}"
+
+      # Hanya varian KSU yang disisipi KernelSU + NoMount
+      - name: Setup KernelSU
+        if: matrix.ksu
+        run: |
+          curl -LSs "https://raw.githubusercontent.com/manipvlator/KernelSU/refs/heads/main/kernel/setup.sh" | bash -s main
+          curl https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/dev/kernel/setup.sh | bash -s master
+
+      # Varian NonKSU: pastikan KSU/NoMount dimatikan di defconfig
+      - name: 🚫 Disable KernelSU (NonKSU)
+        if: ${{ !matrix.ksu }}
+        run: |
+          DEF="arch/arm64/configs/${DEFCONFIG}"
+          sed -i -E '/^(# )?CONFIG_KSU/d; /^(# )?CONFIG_NOMOUNT/d' "$DEF"
+          echo "# CONFIG_KSU is not set" >> "$DEF"
+          echo "Config KSU/NoMount di ${DEF} setelah dibersihkan:"
+          grep -nE 'KSU|NOMOUNT' "$DEF" || true
+
+      - name: Build
+        run: |
+          export PATH="$PWD/clang/bin:$PATH"
+
+          mkdir -p out
+          JOBS=$(( $(nproc --all) * 2 ))
+
+          make -j${JOBS} O=out ${DEFCONFIG}
+          make -j${JOBS} O=out \
+            CC="ccache clang" \
+            HOSTCC="ccache gcc" \
+            HOSTCXX="ccache g++" \
+            Image.gz-dtb
+
+      # Varian NonKSU: gagalkan build kalau KSU masih aktif di .config akhir
+      - name: 🔎 Verify NonKSU config
+        if: ${{ !matrix.ksu }}
+        run: |
+          if grep -qE '^CONFIG_KSU=(y|m)' out/.config; then
+            echo "::error::CONFIG_KSU masih aktif di varian NonKSU"
+            grep -nE 'KSU' out/.config
+            exit 1
+          fi
+          echo "OK: KSU nonaktif di out/.config"
+
+      - name: Package AnyKernel3
+        run: |
+          IMG=out/arch/arm64/boot/Image.gz-dtb
+          if [ ! -f "$IMG" ]; then
+            echo "Image.gz-dtb tidak ditemukan. Isi out/arch/arm64/boot:"
+            ls -la out/arch/arm64/boot
+            exit 1
+          fi
+
+          git clone --depth=1 -b vince https://github.com/miracle7x/AnyKernel3 AnyKernel3
+          cp "$IMG" AnyKernel3/
+
+          ZIP_NAME="evernight-vince-${{ matrix.variant }}-$(TZ=Asia/Jakarta date +%Y%m%d-%H%M).zip"
+          cd AnyKernel3
+          zip -r9 "../${ZIP_NAME}" * -x .git README.md "*placeholder"
+          cd ..
+
+          echo "ZIP_NAME=${ZIP_NAME}" >> "$GITHUB_ENV"
+          ls -lh "${ZIP_NAME}"
+
+      - name: ⬇️ Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: evernight-vince-${{ matrix.variant }}
+          path: evernight-vince-${{ matrix.variant }}-*.zip
+
+      # ── Upload ke Gofile (tanpa API key). Kalau gagal, build tetap sukses & tombol download tidak muncul ──
+      - name: ☁️ Upload to Gofile
+        id: upload
+        continue-on-error: true
+        run: |
+          URL=""
+          for i in 1 2 3; do
+            R="$(curl -sS --retry 2 -F "file=@${ZIP_NAME}" "https://upload.gofile.io/uploadfile" || true)"
+            URL="$(jq -r '.data.downloadPage // empty' <<< "$R" 2>/dev/null || true)"
+            [ -n "$URL" ] && break
+            echo "Percobaan $i gagal: $R"
+            sleep 5
+          done
+          [ -n "$URL" ] || { echo "::warning::Upload Gofile gagal"; exit 1; }
+          echo "Link download: $URL"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      # ── Alternatif Pixeldrain (butuh secret PIXELDRAIN_API_KEY). Ganti step di atas dengan ini jika mau: ──
+      # - name: ☁️ Upload to Pixeldrain
+      #   id: upload
+      #   continue-on-error: true
+      #   env:
+      #     PD_KEY: ${{ secrets.PIXELDRAIN_API_KEY }}
+      #   run: |
+      #     R="$(curl -sS -u ":${PD_KEY}" -T "${ZIP_NAME}" "https://pixeldrain.com/api/file/${ZIP_NAME}")"
+      #     ID="$(jq -r '.id // empty' <<< "$R")"
+      #     [ -n "$ID" ] || { echo "$R"; exit 1; }
+      #     echo "url=https://pixeldrain.com/u/${ID}" >> "$GITHUB_OUTPUT"
+
+      # Simpan status sukses + link download per varian (dibaca job finalize)
+      - name: 📝 Save Meta
+        run: |
+          mkdir -p meta
+          echo "1" > meta/ok
+          echo "${{ steps.upload.outputs.url }}" > meta/url.txt
+
+      - name: 📤 Upload Meta
+        uses: actions/upload-artifact@v4
+        with:
+          name: meta-${{ matrix.variant }}
+          path: meta/
+
+      - name: 🚀 Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: vince-${{ matrix.variant }}-${{ github.run_number }}
+          name: Vince ${{ matrix.label }} Evernight Kernel #${{ github.run_number }}
+          body: |
+            **Varian:** ${{ matrix.label }}
+            **Device:** Redmi 5 Plus / Redmi Note 5 (vince)
+            **Branch:** ${{ github.ref_name }}
+            **Commit:** ${{ github.sha }}
+            **Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          files: evernight-vince-${{ matrix.variant }}-*.zip
+          prerelease: false
+          fail_on_unmatched_files: true
+
+      - name: ⬇️ Telegram Upload
+        env:
+          BRANCH: ${{ github.ref_name }}
+          LABEL: ${{ matrix.label }}
+        run: |
+          ZIP="${ZIP_NAME}"
+          SIZE="$(du -h "$ZIP" | cut -f1)"
+          CAPTION="$(printf '✅ <b>Kernel CI build success (vince - %s)</b>\n\n<b>File:</b> %s\n<b>Size:</b> %s\n<b>Branch:</b> %s\n<b>Commit:</b> <code>%s</code>' \
+            "$LABEL" "$ZIP" "$SIZE" "$BRANCH" "${GITHUB_SHA::7}")"
+
+          R="$(curl -sS \
+            -F chat_id="${TELEGRAM_CHAT_ID}" \
+            -F parse_mode="HTML" \
+            --form-string "caption=${CAPTION}" \
+            -F document=@"${ZIP}" \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument")"
+
+          if [ "$(jq -r '.ok // false' <<< "$R")" != true ]; then
+            echo "::warning::Telegram upload gagal: $(jq -r '.description // "unknown"' <<< "$R")"
+            echo "$R"
+          fi
+
+  # ───────────────────────── 3. Live tracker ─────────────────────────
+  telegram-live:
+    name: Telegram Live Tracker
+    runs-on: ubuntu-latest
+    needs: tracker
+    timeout-minutes: 180
+    env:
+      MESSAGE_ID: ${{ needs.tracker.outputs.message_id }}
+      BUILD_TIME: ${{ needs.tracker.outputs.build_time }}
+      BRANCH: ${{ github.ref_name }}
+      JOB_KSU: Reforging - vince (KSU)
+      JOB_NONKSU: Reforging - vince (NonKSU)
+    steps:
+      - name: 📡 Live Tracking
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -u
+          API="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs?per_page=100"
+          LAST=""
+
+          gh_get() {
+            curl -fsS \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" "$1"
+          }
+
+          esc() { sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+          row() { printf '<tr><th align="left">%s</th><td>%s</td></tr>' "$1" "$(esc <<< "$2")"; }
+
+          # render <status KSU> <status NonKSU> [footer]
+          render() {
+            local h
+            h="<table bordered><tr><th colspan=\"2\" align=\"center\">🔨 EVERNIGHT</th></tr>"
+            h+="$(row "⚙️ KSU" "$1")$(row "⚙️ NonKSU" "$2")</table>"
+            h+="<table bordered>$(row "📱 Device" "Redmi 5 Plus (vince)")"
+            h+="$(row "🌿 Branch" "$BRANCH")$(row "🔖 Commit" "${GITHUB_SHA::7}")"
+            h+="$(row "🕒 Build" "#${BUILD_TIME}")$(row "🔢 Run" "#${GITHUB_RUN_NUMBER}")</table>"
+            if [ -n "${3:-}" ]; then h+="<p>$(esc <<< "$3")</p>"; fi
+            printf '%s' "$h"
+          }
+          rich() { jq -nc --arg h "$1" '{html:$h, skip_entity_detection:true}'; }
+
+          duration() {
+            local s="$1"
+            [ "$s" -lt 0 ] && s=0
+            if [ "$s" -lt 60 ]; then
+              echo "${s}s"
+            elif [ "$s" -lt 3600 ]; then
+              printf '%dm %02ds\n' $((s/60)) $((s%60))
+            else
+              printf '%dh %02dm %02ds\n' $((s/3600)) $(((s%3600)/60)) $((s%60))
+            fi
+          }
+
+          # Status job -> teks singkat
+          step() {
+            local j="$1" s c n t start now
+            if [ -z "$j" ] || [ "$j" = "null" ]; then echo "⏳ Waiting"; return; fi
+
+            s="$(jq -r '.status' <<< "$j")"
+            c="$(jq -r '.conclusion // empty' <<< "$j")"
+
+            if [ "$s" = completed ]; then
+              if [ "$c" = success ]; then
+                echo "✅ Done"
+              elif [ "$c" = cancelled ]; then
+                echo "🚫 Cancelled"
+              else
+                n="$(jq -r '[.steps[] | select(.conclusion=="failure") | .name][0] // empty' <<< "$j" | sed 's/[^ -~]//g; s/^ *//')"
+                echo "❌ Failed - ${n:-Failed}"
+              fi
+              return
+            fi
+
+            if [ "$s" = in_progress ]; then
+              n="$(jq -r '[.steps[] | select(.status=="in_progress") | .name][0] // empty' <<< "$j" | sed 's/[^ -~]//g; s/^ *//')"
+              [ -n "$n" ] || { echo "🔄 Starting..."; return; }
+              t="$(jq -r '[.steps[] | select(.status=="in_progress") | .started_at][0] // empty' <<< "$j")"
+              start="$(date -d "$t" +%s 2>/dev/null || echo 0)"
+              now="$(date -u +%s)"
+              echo "🔄 $(duration $((now-start)))  $n"
+              return
+            fi
+
+            echo "⏳ Waiting"
+          }
+
+          # Tanpa reply_markup -> tidak ada tombol sama sekali
+          update() {
+            local text="$1" r d
+            [ "$text" = "$LAST" ] && return 0
+
+            r="$(curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/editMessageText" \
+              --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+              --data-urlencode "message_id=${MESSAGE_ID}" \
+              --data-urlencode "rich_message=$(rich "$text")")"
+
+            d="$(jq -r '.description // empty' <<< "$r")"
+            if [ "$(jq -r '.ok // false' <<< "$r")" != true ] &&
+               [[ "$d" != *"message is not modified"* ]]; then
+              echo "Telegram update failed: $d"
+              return 1
+            fi
+            LAST="$text"
+          }
+
+          is_done() { [[ "$1" =~ ^(success|failure|cancelled|timed_out|skipped)$ ]]; }
+
+          while true; do
+            JOBS="$(gh_get "$API")" || { sleep 10; continue; }
+
+            K="$(jq -c --arg n "$JOB_KSU"    '[.jobs[] | select(.name==$n)][0] // empty' <<< "$JOBS")"
+            N="$(jq -c --arg n "$JOB_NONKSU" '[.jobs[] | select(.name==$n)][0] // empty' <<< "$JOBS")"
+            S_K="$(step "$K")"
+            S_N="$(step "$N")"
+            C_K="$(jq -r '.conclusion // empty' <<< "$K" 2>/dev/null)"
+            C_N="$(jq -r '.conclusion // empty' <<< "$N" 2>/dev/null)"
+
+            if is_done "$C_K" && is_done "$C_N"; then
+              # Minimal satu sukses: pesan akhir (dengan tombol download) dikirim job "finalize"
+              if [ "$C_K" = success ] || [ "$C_N" = success ]; then
+                exit 0
+              fi
+              update "$(render "$S_K" "$S_N" "❌ Semua build gagal.")" || true
+              exit 0
+            fi
+
+            update "$(render "$S_K" "$S_N")" || true
+            sleep 10
+          done
+
+  # ───────────────────────── 4. Pesan akhir + tombol download ─────────────────────────
+  finalize:
+    name: Telegram Final Message
+    runs-on: ubuntu-latest
+    needs: [tracker, build]
+    # Jalan walau satu varian gagal; kalau semuanya gagal, step akhir di-skip
+    if: always() && needs.tracker.result == 'success' && needs.build.result != 'cancelled'
+    env:
+      MESSAGE_ID: ${{ needs.tracker.outputs.message_id }}
+      BUILD_TIME: ${{ needs.tracker.outputs.build_time }}
+      BRANCH: ${{ github.ref_name }}
+    steps:
+      - name: 📥 Download Meta
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: meta-*
+          path: meta
+
+      - name: ✅ Final Update
+        run: |
+          esc() { sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+          row() { printf '<tr><th align="left">%s</th><td>%s</td></tr>' "$1" "$(esc <<< "$2")"; }
+
+          OK_KSU=false;    [ -f meta/meta-ksu/ok ]    && OK_KSU=true
+          OK_NONKSU=false; [ -f meta/meta-nonksu/ok ] && OK_NONKSU=true
+          URL_KSU="$(tr -d '[:space:]' < meta/meta-ksu/url.txt 2>/dev/null || true)"
+          URL_NONKSU="$(tr -d '[:space:]' < meta/meta-nonksu/url.txt 2>/dev/null || true)"
+
+          # Semua gagal -> pesan gagal sudah dikirim live tracker
+          if [ "$OK_KSU" != true ] && [ "$OK_NONKSU" != true ]; then
+            echo "Tidak ada varian yang sukses, skip."
+            exit 0
+          fi
+
+          S_K="❌ Failed";  [ "${OK_KSU}" = true ]    && S_K="✅ Done"
+          S_N="❌ Failed";  [ "${OK_NONKSU}" = true ] && S_N="✅ Done"
+
+          h="<table bordered><tr><th colspan=\"2\" align=\"center\">🔨 EVERNIGHT</th></tr>"
+          h+="$(row "⚙️ KSU" "$S_K")$(row "⚙️ NonKSU" "$S_N")</table>"
+          h+="<table bordered>$(row "📱 Device" "Redmi 5 Plus (vince)")"
+          h+="$(row "🌿 Branch" "$BRANCH")$(row "🔖 Commit" "${GITHUB_SHA::7}")"
+          h+="$(row "🕒 Build" "#${BUILD_TIME}")$(row "🔢 Run" "#${GITHUB_RUN_NUMBER}")</table>"
+          if [ "${OK_KSU}" = true ] && [ "${OK_NONKSU}" = true ]; then
+            h+="<p>✅ Kedua build selesai.</p>"
+          else
+            h+="<p>⚠️ Sebagian build gagal.</p>"
+          fi
+          RICH="$(jq -nc --arg h "$h" '{html:$h, skip_entity_detection:true}')"
+
+          ARGS=(
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}"
+            --data-urlencode "message_id=${MESSAGE_ID}"
+            --data-urlencode "rich_message=${RICH}"
+          )
+
+          # Tombol download per varian (hanya yang upload-nya berhasil)
+          BTNS='[]'
+          if [ "${OK_KSU}" = true ] && [ -n "${URL_KSU}" ]; then
+            BTNS="$(jq -c --arg d "$URL_KSU" '. + [{text:"📥 KSU", url:$d}]' <<< "$BTNS")"
+          fi
+          if [ "${OK_NONKSU}" = true ] && [ -n "${URL_NONKSU}" ]; then
+            BTNS="$(jq -c --arg d "$URL_NONKSU" '. + [{text:"📥 NonKSU", url:$d}]' <<< "$BTNS")"
+          fi
+          if [ "$BTNS" != '[]' ]; then
+            KB="$(jq -nc --argjson b "$BTNS" '{inline_keyboard: [$b]}')"
+            ARGS+=(--data-urlencode "reply_markup=${KB}")
+          fi
+
+          # Beri jeda supaya update terakhir live tracker tidak menimpa pesan ini
+          sleep 5
+          R="$(curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/editMessageText" "${ARGS[@]}")"
+          [ "$(jq -r '.ok // false' <<< "$R")" = true ] || { echo "$R"; exit 1; }
