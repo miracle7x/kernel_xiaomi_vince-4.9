@@ -312,11 +312,11 @@ jobs:
           # render <status KSU> <status NonKSU> [footer]
           render() {
             local h
-            h="<table bordered><tr><th colspan=\"2\" align=\"center\">🔨 EVERNIGHT</th></tr>"
+            h="<table bordered><tr><th colspan=\"2\" align=\"center\">Build Kernel</th></tr>"
             h+="$(row "⚙️ KSU" "$1")$(row "⚙️ NonKSU" "$2")</table>"
             h+="<table bordered>$(row "📱 Device" "Redmi 5 Plus (vince)")"
-            h+="$(row "🌿 Branch" "$BRANCH")$(row "🔖 Commit" "${GITHUB_SHA::7}")"
-            h+="$(row "🕒 Build" "#${BUILD_TIME}")$(row "🔢 Run" "#${GITHUB_RUN_NUMBER}")</table>"
+            h+="$(row "⚙️ Compiler" "Proton Clang")$(row "🧬 Kernel" "4.9.337")"
+            h+="$(row "🕒 Build" "#${BUILD_TIME}")</table>"
             if [ -n "${3:-}" ]; then h+="<p>$(esc <<< "$3")</p>"; fi
             printf '%s' "$h"
           }
