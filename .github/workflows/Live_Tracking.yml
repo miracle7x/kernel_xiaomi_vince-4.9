@@ -1,4 +1,4 @@
-name: KSU
+name: Tracking
 
 on:
   workflow_dispatch:
@@ -206,6 +206,54 @@ jobs:
             echo "$R"
           fi
 
+      - name: ☁️ Upload ZIP to CDN
+        id: cdn
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -e
+
+          RESP="$(curl -sS --fail-with-body -X POST https://cdn.zass.in/upload \
+            -F "file=@${ZIP_NAME}")" || { echo "❌ Upload CDN gagal: $RESP"; exit 1; }
+
+          echo "Response CDN: $RESP"
+
+          # Ambil URL pertama dari response: coba sebagai JSON dulu, kalau bukan cari https:// biasa
+          URL="$(jq -r '.. | strings | select(test("^https?://"))' <<< "$RESP" 2>/dev/null | head -n 1 || true)"
+          if [[ -z "$URL" ]]; then
+            URL="$(grep -oE 'https?://[^"[:space:]\\]+' <<< "$RESP" | head -n 1 || true)"
+          fi
+
+          [[ -n "$URL" ]] || { echo "❌ URL tidak ditemukan di response CDN"; exit 1; }
+
+          # Hanya terima URL http(s) tanpa spasi
+          [[ "$URL" =~ ^https?://[^[:space:]]+$ ]] || { echo "❌ URL tidak valid"; exit 1; }
+
+          echo "✅ CDN URL: $URL"
+          printf '%s' "$URL" > cdn_url.txt
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      # Artifact kecil berisi URL CDN, dibaca oleh job Telegram Live Tracker untuk tombol download
+      - name: 🔗 Publish CDN URL for Tracker
+        if: steps.cdn.outputs.url != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: cdnurl-${{ matrix.build_type }}
+          path: cdn_url.txt
+
+  final:
+    name: Final
+    runs-on: ubuntu-latest
+    needs: [tracker, Evernight, telegram-live]
+    if: always()
+    steps:
+      - name: 📊 Final Status
+        run: |
+          echo "Evernight FINAL STATUS"
+          echo "Tracker       : ${{ needs.tracker.result }}"
+          echo "Evernight     : ${{ needs.Everniht.result }}"
+          echo "Telegram Live : ${{ needs.telegram-live.result }}"
+          
   # ───────────────────────── 3. Live tracker ─────────────────────────
   telegram-live:
     name: Telegram Live Tracker
