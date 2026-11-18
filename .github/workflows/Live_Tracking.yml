@@ -1,0 +1,60 @@
+name: KSU Variant
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "14" ]   # branch default repo rayola708/kernel_msm-4.9
+
+permissions:
+  contents: write
+  actions: read
+
+env:
+  ARCH: arm64
+  SUBARCH: arm64
+  CLANG_TRIPLE: aarch64-linux-gnu-
+  CROSS_COMPILE: aarch64-linux-gnu-
+  CROSS_COMPILE_ARM32: arm-linux-gnueabi-
+  CCACHE_DIR: /home/runner/.ccache
+  CCACHE_MAXSIZE: 5G
+  CCACHE_COMPRESS: 1
+  CCACHE_COMPRESSLEVEL: 1
+  CCACHE_SLOPPINESS: time_macros,include_file_mtime,include_file_ctime
+  CCACHE_NOHASHDIR: 1
+  KBUILD_BUILD_USER: biarindeh
+  KBUILD_BUILD_HOST: build
+  TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+  TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+jobs:
+  # ───────────────────────── 1. Buat pesan tracker ─────────────────────────
+  tracker:
+    name: Tracker
+    runs-on: ubuntu-latest
+    outputs:
+      message_id: ${{ steps.telegram.outputs.message_id }}
+      build_time: ${{ steps.time.outputs.build_time }}
+    steps:
+      - name: 🕒 Generate Build Time
+        id: time
+        run: echo "build_time=$(TZ=Asia/Jakarta date +'%d%m%Y-%H%M')" >> "$GITHUB_OUTPUT"
+
+      - name: 📡 Create Telegram Tracker
+        id: telegram
+        env:
+          BUILD_TIME: ${{ steps.time.outputs.build_time }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          esc() { sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+          row() { printf '<tr><th align="left">%s</th><td>%s</td></tr>' "$1" "$(esc <<< "$2")"; }
+
+          # render <status> [footer]
+          render() {
+            local h
+            h="<table bordered><tr><th colspan=\"2\" align=\"center\">🔨 EVERNIGHT KSU</th></tr>"
+            h+="$(row "⚙️ Status" "$1")</table>"
+            h+="<table bordered>$(row "📱 Device" "Redmi 5 Plus (vince)")"
+            h+="$(row "🌿 Branch" "$BRANCH")$(row "🔖 Commit" "${GITHUB_SHA::7}")"
+            h+="$(row "🕒 Build" "#${BUILD_TIME}")$(row "🔢 Run" "#${GITHUB_RUN_NUMBER}")</table>"
+            if [ -n "${2:-}" ]; then h+="<p>$(esc <<<
