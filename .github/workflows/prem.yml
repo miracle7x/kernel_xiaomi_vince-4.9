@@ -1,0 +1,347 @@
+name: KSU Premium
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "14" ]   # branch default repo rayola708/kernel_msm-4.9
+
+permissions:
+  contents: write
+
+env:
+  ARCH: arm64
+  SUBARCH: arm64
+  CLANG_TRIPLE: aarch64-linux-gnu-
+  CROSS_COMPILE: aarch64-linux-gnu-
+  CROSS_COMPILE_ARM32: arm-linux-gnueabi-
+  CCACHE_DIR: /home/runner/.ccache
+  CCACHE_MAXSIZE: 5G
+  CCACHE_COMPRESS: 1
+  CCACHE_COMPRESSLEVEL: 1
+  CCACHE_SLOPPINESS: time_macros,include_file_mtime,include_file_ctime
+  CCACHE_NOHASHDIR: 1
+  KBUILD_BUILD_USER: biarindeh
+  KBUILD_BUILD_HOST: build
+  TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+  TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+  KERNEL_ID: evernight-vince-ksu
+  # perkiraan jumlah objek yang dikompilasi (untuk progress bar fase Build)
+  EST_OBJECTS: "2200"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📡 Tracker Init
+        run: |
+          cat > /tmp/tg.sh <<'EOF'
+          API="https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}"
+
+          # index stage -> nama & ikon (urutan sama dengan step workflow)
+          STAGES=("Checkout" "Cache Clang" "Cache ccache" "Deps" "Toolchain" "Detect defconfig" "Setup KernelSU" "Build" "Package AnyKernel3" "Upload Artifact" "Upload Gofile" "GitHub Release")
+          ICONS=("🔄" "⚡" "⚡" "🔧" "⚙️" "🔍" "📥" "🛠️" "📦" "⬇️" "☁️" "🚀")
+
+          bar() {
+            local f=$(( $1 / 10 )) s="" i
+            for i in $(seq 1 10); do
+              if [ "$i" -le "$f" ]; then s+="▰"; else s+="▱"; fi
+            done
+            echo "$s"
+          }
+
+          elapsed() {
+            local t=$(( $(date +%s) - START_TS ))
+            printf '%02dm %02ds' $((t/60)) $((t%60))
+          }
+
+          # render <stage_idx> <pct> <status> <proses>
+          render() {
+            local idx=$1 pct=$2 status=$3 proses=$4 list="" header i icon total=${#STAGES[@]}
+
+            if [ "$idx" -ge "$total" ]; then
+              header="🏁 <b>SELESAI</b>"
+            elif [ "${FAILED:-0}" = "1" ]; then
+              header="❌ <b>GAGAL • ${STAGES[$idx]^^}</b>"
+            else
+              header="${ICONS[$idx]} <b>${STAGES[$idx]^^}</b>"
+            fi
+
+            for i in "${!STAGES[@]}"; do
+              if [ "$i" -lt "$idx" ]; then icon="✅"
+              elif [ "$i" -eq "$idx" ]; then
+                if [ "${FAILED:-0}" = "1" ]; then icon="❌"; else icon="⏳"; fi
+              else icon="▫️"; fi
+              list+="${icon} ${STAGES[$i]}"$'\n'
+            done
+
+            printf '%s\n\n▶ %s\n\n<pre>ID       : %s\nStatus   : %s\nProgres  : %s %s%%\nWaktu    : %s\nProses   : %s\nAlat     : Proton Clang + ccache\nKernel   : %s\nBranch   : %s\nCommit   : %s\nRun      : #%s</pre>\n\n<b>Tahapan</b>\n%s' \
+              "🚀 <b>KERNEL CI • VINCE</b>" "$header" \
+              "$KERNEL_ID" "$status" "$(bar "$pct")" "$pct" "$(elapsed)" "$proses" \
+              "${KVER:-...}" "$GITHUB_REF_NAME" "${GITHUB_SHA::7}" "$GITHUB_RUN_NUMBER" "$list"
+          }
+
+          tg_send() {
+            curl -s -X POST "$API/sendMessage" \
+              -d chat_id="$TELEGRAM_CHAT_ID" -d parse_mode=HTML \
+              -d disable_web_page_preview=true \
+              --data-urlencode "text=$1" | jq -r '.result.message_id // empty'
+          }
+
+          # tg_edit <text> [reply_markup_json]
+          tg_edit() {
+            local args=(-s -X POST "$API/editMessageText"
+              -d chat_id="$TELEGRAM_CHAT_ID" -d message_id="$MSG_ID"
+              -d parse_mode=HTML -d disable_web_page_preview=true
+              --data-urlencode "text=$1")
+            [ -n "$2" ] && args+=(--data-urlencode "reply_markup=$2")
+            curl "${args[@]}" > /dev/null || true
+          }
+
+          # update <stage_idx> <pct> <status> <proses> [markup]
+          update() {
+            echo "CUR_STAGE=$1" >> "$GITHUB_ENV"
+            echo "CUR_PCT=$2" >> "$GITHUB_ENV"
+            tg_edit "$(render "$1" "$2" "$3" "$4")" "$5"
+          }
+          EOF
+
+          source /tmp/tg.sh
+          START_TS=$(date +%s)
+          MSG_ID=$(tg_send "$(render 0 3 '🟡 Memulai' 'Checkout repo')")
+          echo "START_TS=${START_TS}" >> "$GITHUB_ENV"
+          echo "MSG_ID=${MSG_ID}" >> "$GITHUB_ENV"
+          echo "CUR_STAGE=0" >> "$GITHUB_ENV"
+          echo "CUR_PCT=3" >> "$GITHUB_ENV"
+
+      - name: 🔄 Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: 📍 Header • Cache Clang
+        run: |
+          source /tmp/tg.sh
+          update 1 6 "⚡ Berjalan" "Restore cache Clang"
+
+      - name: ⚡ Cache Clang
+        uses: actions/cache@v4
+        with:
+          path: clang
+          key: ${{ runner.os }}-proton-clang-master
+
+      - name: 📍 Header • Cache ccache
+        run: |
+          source /tmp/tg.sh
+          update 2 9 "⚡ Berjalan" "Restore cache ccache"
+
+      - name: ⚡ Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/.ccache
+          key: ${{ runner.os }}-ccache-vince-${{ github.sha }}
+          restore-keys: ${{ runner.os }}-ccache-vince-
+
+      - name: 🔧 Deps
+        run: |
+          source /tmp/tg.sh
+          update 3 13 "🔧 Berjalan" "Install dependencies"
+
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends bc bison flex libssl-dev libelf-dev ccache zip libncurses6
+          sudo ln -sf /usr/lib/x86_64-linux-gnu/libtinfo.so.6 /usr/lib/x86_64-linux-gnu/libtinfo.so.5 2>/dev/null || true
+          sudo ln -sf /usr/lib/x86_64-linux-gnu/libncurses.so.6 /usr/lib/x86_64-linux-gnu/libncurses.so.5 2>/dev/null || true
+
+      - name: ⚙ Toolchain
+        run: |
+          source /tmp/tg.sh
+          update 4 18 "⚙️ Berjalan" "Menyiapkan Proton Clang"
+
+          if [ ! -f "clang/bin/clang" ]; then
+            git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang
+          fi
+          # Hapus binutils host bawaan proton agar memakai ld/as bawaan sistem
+          rm -f clang/bin/ld clang/bin/as
+
+      - name: 🔍 Detect defconfig
+        run: |
+          source /tmp/tg.sh
+          update 5 25 "🔍 Berjalan" "Mendeteksi defconfig"
+
+          DEF=$(find arch/arm64/configs/vince-perf_defconfig | head -n1)
+          if [ -z "$DEF" ]; then
+            echo "vince-perf_defconfig tidak ditemukan. Isi arch/arm64/configs:"
+            ls -R arch/arm64/configs | head -n 80
+            exit 1
+          fi
+          # simpan path relatif terhadap arch/arm64/configs (mis. vince_defconfig atau vendor/vince_defconfig)
+          echo "DEFCONFIG=${DEF#arch/arm64/configs/}" >> $GITHUB_ENV
+          echo "Pakai defconfig: ${DEF#arch/arm64/configs/}"
+
+          KVER=$(make -s kernelversion 2>/dev/null || echo "unknown")
+          echo "KVER=${KVER}" >> $GITHUB_ENV
+
+      - name: 📥 Setup KernelSU
+        run: |
+          source /tmp/tg.sh
+          update 6 30 "📥 Berjalan" "Setup KernelSU + NoMount"
+
+          curl -LSs "https://raw.githubusercontent.com/manipvlator/KernelSU/refs/heads/main/kernel/setup.sh" | bash -s main
+          curl https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/dev/kernel/setup.sh | bash -s master
+
+      - name: 🛠️ Build
+        run: |
+          source /tmp/tg.sh
+          export PATH="$PWD/clang/bin:$PATH"
+
+          mkdir -p out
+          JOBS=$(( $(nproc --all) * 2 ))
+
+          update 7 35 "🛠️ Building" "Generate defconfig"
+          make -j${JOBS} O=out ${DEFCONFIG} > build.log 2>&1 || { echo "defconfig gagal"; tail -n 40 build.log; exit 1; }
+
+          make -j${JOBS} O=out \
+            CC="ccache clang" \
+            HOSTCC="ccache gcc" \
+            HOSTCXX="ccache g++" \
+            Image.gz-dtb >> build.log 2>&1 &
+          PID=$!
+
+          # live tracker: edit pesan tiap 20 detik selama kompilasi
+          while kill -0 "$PID" 2>/dev/null; do
+            sleep 20
+            DONE=$(grep -c -E '^\s+(CC|AS|LD|AR)\s' build.log || true)
+            P=$(( DONE * 100 / EST_OBJECTS ))
+            [ "$P" -gt 99 ] && P=99
+            OVERALL=$(( 35 + P * 50 / 100 ))
+            update 7 "$OVERALL" "🛠️ Building" "Compile ${DONE} objek (~${P}%)"
+          done
+
+          if ! wait "$PID"; then
+            echo "Build gagal. 60 baris terakhir:"
+            tail -n 60 build.log
+            exit 1
+          fi
+
+      - name: 📦 Package AnyKernel3
+        run: |
+          source /tmp/tg.sh
+          update 8 88 "📦 Berjalan" "Packaging AnyKernel3"
+
+          IMG=out/arch/arm64/boot/Image.gz-dtb
+          if [ ! -f "$IMG" ]; then
+            echo "Image.gz-dtb tidak ditemukan. Isi out/arch/arm64/boot:"
+            ls -la out/arch/arm64/boot
+            exit 1
+          fi
+
+          git clone --depth=1 -b vince https://github.com/miracle7x/AnyKernel3 AnyKernel3
+          cp "$IMG" AnyKernel3/
+
+          ZIP_NAME="evernight-vince-ksu-$(date +%Y%m%d-%H%M).zip"
+          cd AnyKernel3
+          zip -r9 "../${ZIP_NAME}" * -x .git README.md "*placeholder"
+          cd ..
+
+          echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
+          ls -lh "${ZIP_NAME}"
+
+      - name: 📍 Header • Upload Artifact
+        run: |
+          source /tmp/tg.sh
+          update 9 91 "⬇️ Berjalan" "Upload artifact GitHub"
+
+      - name: ⬇️ Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: evernight-vince-ksu
+          path: evernight-vince-ksu-*.zip
+
+      - name: ☁️ Upload Gofile
+        run: |
+          source /tmp/tg.sh
+          update 10 94 "☁️ Uploading" "Upload zip ke Gofile"
+
+          ZIP=$(ls evernight-vince-ksu-*.zip | head -n1)
+          SIZE=$(du -h "$ZIP" | cut -f1)
+          echo "ZIP_SIZE=${SIZE}" >> $GITHUB_ENV
+
+          LINK=""
+          for i in 1 2 3; do
+            RESP=$(curl -s -F "file=@${ZIP}" https://upload.gofile.io/uploadfile || true)
+            LINK=$(echo "$RESP" | jq -r '.data.downloadPage // empty' 2>/dev/null || true)
+            [ -n "$LINK" ] && break
+            sleep 5
+          done
+
+          # fallback ke halaman artifact kalau gofile gagal
+          if [ -z "$LINK" ]; then
+            LINK="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          fi
+          echo "DL_LINK=${LINK}" >> $GITHUB_ENV
+
+      - name: 📍 Header • GitHub Release
+        run: |
+          source /tmp/tg.sh
+          update 11 97 "🚀 Berjalan" "Upload ke GitHub Release"
+
+      - name: 🚀 Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: vince-ksu-${{ github.run_number }}
+          name: Vince KSU Evernight Kernel #${{ github.run_number }}
+          body: |
+            **Device:** Redmi 5 Plus / Redmi Note 5 (vince)
+            **Branch:** ${{ github.ref_name }}
+            **Commit:** ${{ github.sha }}
+            **Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          files: evernight-vince-ksu-*.zip
+          prerelease: false
+          fail_on_unmatched_files: true
+
+      - name: ✅ Telegram Finish
+        run: |
+          source /tmp/tg.sh
+          ZIP=$(ls evernight-vince-ksu-*.zip | head -n1)
+
+          MARKUP=$(jq -nc --arg url "$DL_LINK" \
+            '{inline_keyboard:[[{text:"⬇️ Download Kernel",url:$url}]]}')
+
+          update 12 100 "✅ Selesai" "Build sukses • ${ZIP_SIZE}" "$MARKUP"
+
+          # kirim juga zip sebagai dokumen (reply ke tracker)
+          curl -s -F document=@"$ZIP" \
+            -F chat_id="${TELEGRAM_CHAT_ID}" \
+            -F reply_to_message_id="${MSG_ID}" \
+            -F parse_mode="HTML" \
+            -F caption=$'✅ <b>Kernel CI build success (vince)</b>\n\n<b>File:</b> '"$ZIP"$'\n<b>Size:</b> '"$ZIP_SIZE"$'\n<b>Kernel:</b> '"$KVER"$'\n<b>Commit:</b> <code>'"${GITHUB_SHA::7}"$'</code>' \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" > /dev/null || true
+
+      - name: ❌ Telegram Failed
+        if: failure()
+        run: |
+          source /tmp/tg.sh
+          FAILED=1
+
+          # kalau gagal sebelum tracker dibuat
+          if [ -z "$MSG_ID" ]; then
+            MSG_ID=$(tg_send "❌ <b>Kernel CI gagal (vince)</b>")
+          fi
+
+          STAGE=${CUR_STAGE:-0}
+          PCT=${CUR_PCT:-0}
+          MARKUP=$(jq -nc --arg url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            '{inline_keyboard:[[{text:"📄 Lihat Log Run",url:$url}]]}')
+
+          update "$STAGE" "$PCT" "❌ Gagal" "Terhenti di tahap ${STAGES[$STAGE]}" "$MARKUP"
+
+          # kirim 80 baris terakhir log build kalau ada
+          if [ -f build.log ]; then
+            tail -n 80 build.log > build-error.log
+            curl -s -F document=@build-error.log \
+              -F chat_id="${TELEGRAM_CHAT_ID}" \
+              -F reply_to_message_id="${MSG_ID}" \
+              -F caption="📄 Log error (80 baris terakhir)" \
+              "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" > /dev/null || true
+          fi
